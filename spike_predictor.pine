@@ -1,0 +1,242 @@
+//@version=5
+indicator("Spike Predictor — Pre-Spike Detection", overlay=true, max_boxes_count=500, max_labels_count=500)
+
+// =====================
+// INPUTS
+// =====================
+grpCore   = "Core Settings"
+pivotLen  = input.int(5, "Swing Length", minval=2, group=grpCore)
+lookback  = input.int(20, "Lookback Period", minval=5, group=grpCore)
+
+grpVol    = "Volume Analysis"
+volMaLen  = input.int(20, "Volume MA Length", minval=5, group=grpVol)
+volSpike  = input.float(1.5, "Volume Buildup Threshold", minval=1.0, step=0.1, group=grpVol)
+
+grpSqueeze = "Volatility Squeeze"
+bbLen     = input.int(20, "Bollinger Length", minval=5, group=grpSqueeze)
+bbMult    = input.float(2.0, "Bollinger Mult", minval=0.5, step=0.1, group=grpSqueeze)
+kcLen     = input.int(20, "Keltner Length", minval=5, group=grpSqueeze)
+kcMult    = input.float(1.5, "Keltner Mult", minval=0.5, step=0.1, group=grpSqueeze)
+
+grpLiq    = "Liquidity Settings"
+eqThresh  = input.float(0.15, "Equal High/Low Threshold (%)", minval=0.01, step=0.01, group=grpLiq) / 100
+proxPct   = input.float(0.3, "Liquidity Proximity (%)", minval=0.05, step=0.05, group=grpLiq) / 100
+
+grpKZ     = "Kill Zones"
+useKZ     = input.bool(true, "Use Kill Zone Filter", group=grpKZ)
+
+grpDisplay = "Display"
+showZones  = input.bool(true, "Show Danger Zones", group=grpDisplay)
+showLabels = input.bool(true, "Show Prediction Labels", group=grpDisplay)
+showDash   = input.bool(true, "Show Dashboard", group=grpDisplay)
+minScore   = input.int(3, "Min Score to Signal (1-6)", minval=1, maxval=6, group=grpDisplay)
+
+// =====================
+// KILL ZONES
+// =====================
+hourUTC    = hour(time, "UTC")
+londonKill = hourUTC >= 7 and hourUTC < 10
+nyKill     = hourUTC >= 13 and hourUTC < 16
+asiaKill   = hourUTC >= 0 and hourUTC < 3
+inKillZone = londonKill or nyKill or asiaKill
+
+bgcolor(useKZ and londonKill ? color.new(color.purple, 95) : na)
+bgcolor(useKZ and nyKill ? color.new(color.orange, 95) : na)
+
+// =====================
+// 1. VOLATILITY SQUEEZE (BB inside KC = compression)
+// =====================
+bbBasis = ta.sma(close, bbLen)
+bbUpper = bbBasis + bbMult * ta.stdev(close, bbLen)
+bbLower = bbBasis - bbMult * ta.stdev(close, bbLen)
+
+kcBasis = ta.sma(close, kcLen)
+kcRange = ta.atr(kcLen)
+kcUpper = kcBasis + kcMult * kcRange
+kcLower = kcBasis - kcMult * kcRange
+
+sqzOn      = bbLower > kcLower and bbUpper < kcUpper
+sqzOff     = not sqzOn
+sqzFiring  = sqzOn[1] and sqzOff
+
+sqzCount = 0
+for i = 1 to 5
+    if sqzOn[i]
+        sqzCount += 1
+
+deepSqueeze = sqzCount >= 3
+
+// =====================
+// 2. VOLUME BUILDUP — rising volume during compression
+// =====================
+volMA       = ta.sma(volume, volMaLen)
+volRising   = volume > volMA * volSpike
+volGradient = ta.sma(volume, 3) > ta.sma(volume, 7)
+
+// =====================
+// 3. ATR COMPRESSION then expansion
+// =====================
+atrFast = ta.atr(5)
+atrSlow = ta.atr(14)
+atrRatio = atrFast / atrSlow
+atrCompressed = atrRatio < 0.75
+atrExpanding  = atrRatio > atrRatio[1] and atrRatio[1] < atrRatio[2]
+
+// =====================
+// 4. LIQUIDITY POOL PROXIMITY
+// =====================
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+var float lastHigh = na
+var float prevHigh = na
+var float lastLow  = na
+var float prevLow  = na
+
+if not na(ph)
+    prevHigh := lastHigh
+    lastHigh := ph
+
+if not na(pl)
+    prevLow := lastLow
+    lastLow := pl
+
+eqHigh = not na(lastHigh) and not na(prevHigh) and math.abs(lastHigh - prevHigh) / lastHigh < eqThresh
+eqLow  = not na(lastLow) and not na(prevLow) and math.abs(lastLow - prevLow) / lastLow < eqThresh
+
+liqHigh = eqHigh ? math.max(lastHigh, prevHigh) : na
+liqLow  = eqLow ? math.min(lastLow, prevLow) : na
+
+nearLiqHigh = not na(liqHigh) and math.abs(high - liqHigh) / liqHigh < proxPct
+nearLiqLow  = not na(liqLow) and math.abs(low - liqLow) / liqLow < proxPct
+
+plot(not na(liqHigh) ? liqHigh : na, "Sell-side Liquidity", color=color.new(color.red, 40), linewidth=1, style=plot.style_linebr)
+plot(not na(liqLow) ? liqLow : na, "Buy-side Liquidity", color=color.new(color.green, 40), linewidth=1, style=plot.style_linebr)
+
+// =====================
+// 5. CANDLE PATTERNS — indecision before spike
+// =====================
+bodySize   = math.abs(close - open)
+candleRange = high - low
+doji       = candleRange > 0 and bodySize / candleRange < 0.15
+smallBody  = candleRange > 0 and bodySize / candleRange < 0.3
+
+indecisionCount = 0
+for i = 1 to 3
+    bSize = math.abs(close[i] - open[i])
+    cRange = high[i] - low[i]
+    if cRange > 0 and bSize / cRange < 0.3
+        indecisionCount += 1
+
+tightConsolidation = indecisionCount >= 2
+
+// =====================
+// 6. MOMENTUM DIVERGENCE — hidden pressure
+// =====================
+rsiVal    = ta.rsi(close, 14)
+rsiBullDiv = close < close[3] and rsiVal > rsiVal[3]
+rsiBearDiv = close > close[3] and rsiVal < rsiVal[3]
+
+// =====================
+// SCORING ENGINE
+// =====================
+bullScore = 0
+bearScore = 0
+
+bullScore += deepSqueeze or sqzFiring ? 2 : (sqzOn ? 1 : 0)
+bearScore += deepSqueeze or sqzFiring ? 2 : (sqzOn ? 1 : 0)
+
+bullScore += volRising and volGradient ? 2 : (volRising ? 1 : 0)
+bearScore += volRising and volGradient ? 2 : (volRising ? 1 : 0)
+
+bullScore += atrCompressed ? 1 : 0
+bearScore += atrCompressed ? 1 : 0
+
+bullScore += nearLiqLow ? 2 : 0
+bearScore += nearLiqHigh ? 2 : 0
+
+bullScore += tightConsolidation ? 1 : 0
+bearScore += tightConsolidation ? 1 : 0
+
+bullScore += rsiBullDiv ? 1 : 0
+bearScore += rsiBearDiv ? 1 : 0
+
+kzBonus = useKZ and inKillZone ? 1 : 0
+bullScore += kzBonus
+bearScore += kzBonus
+
+bullBias = nearLiqLow or rsiBullDiv
+bearBias = nearLiqHigh or rsiBearDiv
+
+finalScore = math.max(bullScore, bearScore)
+isBullish  = bullScore > bearScore
+isBearish  = bearScore > bullScore
+
+// =====================
+// SIGNAL OUTPUT
+// =====================
+bullSignal = finalScore >= minScore and bullBias and (not useKZ or inKillZone)
+bearSignal = finalScore >= minScore and bearBias and (not useKZ or inKillZone)
+
+bullColor = finalScore >= 5 ? color.lime : color.new(color.lime, 40)
+bearColor = finalScore >= 5 ? color.red : color.new(color.red, 40)
+
+bullText = finalScore >= 5 ? "SPIKE▲" : "spike▲"
+bearText = finalScore >= 5 ? "SPIKE▼" : "spike▼"
+
+plotshape(showLabels and bullSignal, location=location.belowbar, style=shape.labelup, color=bullColor, text="⚡", textcolor=color.white, size=size.small)
+plotshape(showLabels and bearSignal, location=location.abovebar, style=shape.labeldown, color=bearColor, text="⚡", textcolor=color.white, size=size.small)
+
+// =====================
+// DANGER ZONE BOXES — highlight compression areas
+// =====================
+var box dangerBox = na
+
+if showZones and (deepSqueeze or sqzFiring) and atrCompressed
+    zoneTop    = high + atrFast * 0.5
+    zoneBottom = low - atrFast * 0.5
+    zoneColor  = color.new(color.yellow, 85)
+    dangerBox := box.new(bar_index - 3, zoneTop, bar_index, zoneBottom, bgcolor=zoneColor, border_color=color.new(color.yellow, 50), border_width=1)
+
+// =====================
+// SCORE PLOT (separate pane implied by non-overlay usage)
+// =====================
+plot(finalScore, "Spike Score", color=finalScore >= minScore ? color.yellow : color.gray, linewidth=2)
+
+// =====================
+// DASHBOARD TABLE
+// =====================
+if showDash and barstate.islast
+    var table dash = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 80), border_width=1)
+
+    table.cell(dash, 0, 0, "SPIKE PREDICTOR", text_color=color.yellow, text_size=size.small)
+    table.cell(dash, 1, 0, "", text_size=size.small)
+
+    table.cell(dash, 0, 1, "Score", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 1, str.tostring(finalScore) + " / 6", text_color=finalScore >= minScore ? color.yellow : color.gray, text_size=size.tiny)
+
+    table.cell(dash, 0, 2, "Squeeze", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 2, sqzFiring ? "FIRING !" : (deepSqueeze ? "DEEP" : (sqzOn ? "ON" : "OFF")), text_color=sqzFiring ? color.lime : (sqzOn ? color.yellow : color.gray), text_size=size.tiny)
+
+    table.cell(dash, 0, 3, "Volume", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 3, volRising and volGradient ? "SURGING" : (volRising ? "HIGH" : "NORMAL"), text_color=volRising ? color.lime : color.gray, text_size=size.tiny)
+
+    table.cell(dash, 0, 4, "ATR", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 4, atrCompressed ? "COMPRESSED" : "NORMAL", text_color=atrCompressed ? color.yellow : color.gray, text_size=size.tiny)
+
+    table.cell(dash, 0, 5, "Liquidity", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 5, nearLiqHigh ? "NEAR HIGH" : (nearLiqLow ? "NEAR LOW" : "CLEAR"), text_color=(nearLiqHigh or nearLiqLow) ? color.orange : color.gray, text_size=size.tiny)
+
+    table.cell(dash, 0, 6, "Pattern", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 6, tightConsolidation ? "TIGHT" : "NONE", text_color=tightConsolidation ? color.yellow : color.gray, text_size=size.tiny)
+
+    table.cell(dash, 0, 7, "Bias", text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 7, isBullish and finalScore >= minScore ? "BULL ▲" : (isBearish and finalScore >= minScore ? "BEAR ▼" : "NEUTRAL"), text_color=isBullish and finalScore >= minScore ? color.lime : (isBearish and finalScore >= minScore ? color.red : color.gray), text_size=size.tiny)
+
+// =====================
+// ALERTS
+// =====================
+alertcondition(bullSignal, "Bullish Spike Incoming", "⚡ Pre-spike bullish conditions detected")
+alertcondition(bearSignal, "Bearish Spike Incoming", "⚡ Pre-spike bearish conditions detected")
+alertcondition(sqzFiring, "Squeeze Firing", "Volatility squeeze just released — spike imminent")
+alertcondition(finalScore >= 5, "High Confidence Spike", "Spike score 5+ — high probability spike incoming")
