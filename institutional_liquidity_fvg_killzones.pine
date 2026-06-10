@@ -1,5 +1,5 @@
 //@version=5
-indicator("Institutional Liquidity + FVG + Kill Zones (Stable)", overlay=true, max_boxes_count=500)
+indicator("Institutional Liquidity + FVG + Kill Zones (Stable)", overlay=true, max_boxes_count=500, max_lines_count=500)
 
 // =====================
 // INPUTS
@@ -9,6 +9,7 @@ eqThreshold = input.float(0.15, "Equal High/Low Threshold (%)") / 100
 showFVG = input.bool(true, "Show FVG")
 showKillZones = input.bool(true, "Show Kill Zones")
 showLiquidity = input.bool(true, "Show Liquidity")
+maxFVG = input.int(50, "Max Active FVG Boxes", minval=5, maxval=200)
 
 // =====================
 // KILL ZONES
@@ -41,16 +42,36 @@ if not na(pl)
     lastLow := pl
 
 // =====================
-// LIQUIDITY POOLS
+// LIQUIDITY POOLS (dynamic lines that extend with price)
 // =====================
 eqHigh = not na(lastHigh) and not na(prevHigh) and math.abs(lastHigh - prevHigh) / lastHigh < eqThreshold
 eqLow  = not na(lastLow) and not na(prevLow) and math.abs(lastLow - prevLow) / lastLow < eqThreshold
 
+var line liqHighLine = na
+var line liqLowLine  = na
+
+if showLiquidity and eqHigh
+    if not na(liqHighLine)
+        line.delete(liqHighLine)
+    liqHighLine := line.new(bar_index, lastHigh, bar_index + 1, lastHigh, color=color.red, width=2, extend=extend.right)
+
+if showLiquidity and not eqHigh and not na(liqHighLine)
+    line.set_extend(liqHighLine, extend.none)
+    line.set_x2(liqHighLine, bar_index)
+    liqHighLine := na
+
+if showLiquidity and eqLow
+    if not na(liqLowLine)
+        line.delete(liqLowLine)
+    liqLowLine := line.new(bar_index, lastLow, bar_index + 1, lastLow, color=color.green, width=2, extend=extend.right)
+
+if showLiquidity and not eqLow and not na(liqLowLine)
+    line.set_extend(liqLowLine, extend.none)
+    line.set_x2(liqLowLine, bar_index)
+    liqLowLine := na
+
 liqHigh = eqHigh ? lastHigh : na
 liqLow  = eqLow ? lastLow : na
-
-plot(showLiquidity ? liqHigh : na, "Sell-side Liquidity", color=color.red, linewidth=2, style=plot.style_linebr)
-plot(showLiquidity ? liqLow : na, "Buy-side Liquidity", color=color.green, linewidth=2, style=plot.style_linebr)
 
 // =====================
 // SWEEPS
@@ -71,13 +92,48 @@ bullFVG = low > high[2]
 bearFVG = high < low[2]
 
 // =====================
-// FVG BOXES (FIXED: SINGLE LINE ONLY)
+// FVG BOXES — live extension + auto-delete on fill
 // =====================
+var array<box> fvgBoxes    = array.new_box()
+var array<float> fvgTops   = array.new_float()
+var array<float> fvgBots   = array.new_float()
+var array<bool> fvgIsBull  = array.new_bool()
+
 if showFVG and bullFVG
-    box.new(bar_index - 2, low, bar_index, high[2], bgcolor=color.new(color.green, 85), border_color=color.green)
+    b = box.new(bar_index - 2, low, bar_index, high[2], bgcolor=color.new(color.green, 85), border_color=color.green)
+    array.push(fvgBoxes, b)
+    array.push(fvgTops, low)
+    array.push(fvgBots, high[2])
+    array.push(fvgIsBull, true)
 
 if showFVG and bearFVG
-    box.new(bar_index - 2, low[2], bar_index, high, bgcolor=color.new(color.red, 85), border_color=color.red)
+    b = box.new(bar_index - 2, low[2], bar_index, high, bgcolor=color.new(color.red, 85), border_color=color.red)
+    array.push(fvgBoxes, b)
+    array.push(fvgTops, low[2])
+    array.push(fvgBots, high)
+    array.push(fvgIsBull, false)
+
+if array.size(fvgBoxes) > 0
+    for i = array.size(fvgBoxes) - 1 to 0
+        bTop  = array.get(fvgTops, i)
+        bBot  = array.get(fvgBots, i)
+        isBull = array.get(fvgIsBull, i)
+        filled = isBull ? low <= bBot : high >= bTop
+        if filled
+            box.delete(array.get(fvgBoxes, i))
+            array.remove(fvgBoxes, i)
+            array.remove(fvgTops, i)
+            array.remove(fvgBots, i)
+            array.remove(fvgIsBull, i)
+        else
+            box.set_right(array.get(fvgBoxes, i), bar_index)
+
+if array.size(fvgBoxes) > maxFVG
+    box.delete(array.get(fvgBoxes, 0))
+    array.remove(fvgBoxes, 0)
+    array.remove(fvgTops, 0)
+    array.remove(fvgBots, 0)
+    array.remove(fvgIsBull, 0)
 
 // =====================
 // SCORE

@@ -1,5 +1,5 @@
 //@version=5
-indicator("Spike Predictor — Pre-Spike Detection", overlay=true, max_boxes_count=500, max_labels_count=500)
+indicator("Spike Predictor — Pre-Spike Detection", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500)
 
 // =====================
 // INPUTS
@@ -30,6 +30,7 @@ showZones  = input.bool(true, "Show Danger Zones", group=grpDisplay)
 showLabels = input.bool(true, "Show Prediction Labels", group=grpDisplay)
 showDash   = input.bool(true, "Show Dashboard", group=grpDisplay)
 minScore   = input.int(3, "Min Score to Signal (1-6)", minval=1, maxval=6, group=grpDisplay)
+maxDangerBoxes = input.int(30, "Max Danger Zone Boxes", minval=5, maxval=100, group=grpDisplay)
 
 // =====================
 // KILL ZONES
@@ -83,7 +84,7 @@ atrCompressed = atrRatio < 0.75
 atrExpanding  = atrRatio > atrRatio[1] and atrRatio[1] < atrRatio[2]
 
 // =====================
-// 4. LIQUIDITY POOL PROXIMITY
+// 4. LIQUIDITY POOL PROXIMITY (dynamic lines)
 // =====================
 ph = ta.pivothigh(high, pivotLen, pivotLen)
 pl = ta.pivotlow(low, pivotLen, pivotLen)
@@ -107,11 +108,31 @@ eqLow  = not na(lastLow) and not na(prevLow) and math.abs(lastLow - prevLow) / l
 liqHigh = eqHigh ? math.max(lastHigh, prevHigh) : na
 liqLow  = eqLow ? math.min(lastLow, prevLow) : na
 
+var line liqHighLine = na
+var line liqLowLine  = na
+
+if eqHigh
+    if not na(liqHighLine)
+        line.delete(liqHighLine)
+    liqHighLine := line.new(bar_index, liqHigh, bar_index + 1, liqHigh, color=color.new(color.red, 40), width=1, extend=extend.right)
+
+if not eqHigh and not na(liqHighLine)
+    line.set_extend(liqHighLine, extend.none)
+    line.set_x2(liqHighLine, bar_index)
+    liqHighLine := na
+
+if eqLow
+    if not na(liqLowLine)
+        line.delete(liqLowLine)
+    liqLowLine := line.new(bar_index, liqLow, bar_index + 1, liqLow, color=color.new(color.green, 40), width=1, extend=extend.right)
+
+if not eqLow and not na(liqLowLine)
+    line.set_extend(liqLowLine, extend.none)
+    line.set_x2(liqLowLine, bar_index)
+    liqLowLine := na
+
 nearLiqHigh = not na(liqHigh) and math.abs(high - liqHigh) / liqHigh < proxPct
 nearLiqLow  = not na(liqLow) and math.abs(low - liqLow) / liqLow < proxPct
-
-plot(not na(liqHigh) ? liqHigh : na, "Sell-side Liquidity", color=color.new(color.red, 40), linewidth=1, style=plot.style_linebr)
-plot(not na(liqLow) ? liqLow : na, "Buy-side Liquidity", color=color.new(color.green, 40), linewidth=1, style=plot.style_linebr)
 
 // =====================
 // 5. CANDLE PATTERNS — indecision before spike
@@ -181,25 +202,46 @@ bearSignal = finalScore >= minScore and bearBias and (not useKZ or inKillZone)
 bullColor = finalScore >= 5 ? color.lime : color.new(color.lime, 40)
 bearColor = finalScore >= 5 ? color.red : color.new(color.red, 40)
 
-bullText = finalScore >= 5 ? "SPIKE▲" : "spike▲"
-bearText = finalScore >= 5 ? "SPIKE▼" : "spike▼"
-
 plotshape(showLabels and bullSignal, location=location.belowbar, style=shape.labelup, color=bullColor, text="⚡", textcolor=color.white, size=size.small)
 plotshape(showLabels and bearSignal, location=location.abovebar, style=shape.labeldown, color=bearColor, text="⚡", textcolor=color.white, size=size.small)
 
 // =====================
-// DANGER ZONE BOXES — highlight compression areas
+// DANGER ZONE BOXES — live extension + auto-expire
 // =====================
-var box dangerBox = na
+var array<box> dangerBoxes   = array.new_box()
+var array<float> dangerTops  = array.new_float()
+var array<float> dangerBots  = array.new_float()
 
 if showZones and (deepSqueeze or sqzFiring) and atrCompressed
     zoneTop    = high + atrFast * 0.5
     zoneBottom = low - atrFast * 0.5
     zoneColor  = color.new(color.yellow, 85)
-    dangerBox := box.new(bar_index - 3, zoneTop, bar_index, zoneBottom, bgcolor=zoneColor, border_color=color.new(color.yellow, 50), border_width=1)
+    b = box.new(bar_index - 3, zoneTop, bar_index, zoneBottom, bgcolor=zoneColor, border_color=color.new(color.yellow, 50), border_width=1)
+    array.push(dangerBoxes, b)
+    array.push(dangerTops, zoneTop)
+    array.push(dangerBots, zoneBottom)
+
+if array.size(dangerBoxes) > 0
+    for i = array.size(dangerBoxes) - 1 to 0
+        dTop = array.get(dangerTops, i)
+        dBot = array.get(dangerBots, i)
+        broken = high > dTop or low < dBot
+        if broken
+            box.delete(array.get(dangerBoxes, i))
+            array.remove(dangerBoxes, i)
+            array.remove(dangerTops, i)
+            array.remove(dangerBots, i)
+        else
+            box.set_right(array.get(dangerBoxes, i), bar_index)
+
+if array.size(dangerBoxes) > maxDangerBoxes
+    box.delete(array.get(dangerBoxes, 0))
+    array.remove(dangerBoxes, 0)
+    array.remove(dangerTops, 0)
+    array.remove(dangerBots, 0)
 
 // =====================
-// SCORE PLOT (separate pane implied by non-overlay usage)
+// SCORE PLOT
 // =====================
 plot(finalScore, "Spike Score", color=finalScore >= minScore ? color.yellow : color.gray, linewidth=2)
 
